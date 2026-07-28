@@ -27,7 +27,10 @@ class Settings(BaseSettings):
     ai_summary_enabled: bool = False
 
     world_bank_base_url: str = "https://api.worldbank.org/v2"
-    rest_countries_base_url: str = "https://restcountries.com/v3.1"
+    # REST Countries v3 is deprecated/key-gated; use public mledoze dataset instead
+    countries_dataset_url: str = (
+        "https://raw.githubusercontent.com/mledoze/countries/master/countries.json"
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:

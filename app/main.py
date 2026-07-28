@@ -17,6 +17,8 @@ async def lifespan(_: FastAPI):
     db = SessionLocal()
     try:
         await seed_countries_from_restcountries(db)
+    except Exception as exc:  # noqa: BLE001 - keep API up if seed source is unavailable
+        print(f"Country seed skipped: {exc}")
     finally:
         db.close()
     yield

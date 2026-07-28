@@ -12,16 +12,27 @@ from app.models import Country
 settings = get_settings()
 
 
+def _flag_url(iso2: str, flags: dict | None = None) -> str | None:
+    if flags:
+        if isinstance(flags, dict):
+            svg = flags.get("svg") or flags.get("png")
+            if isinstance(svg, str):
+                return svg
+    return f"https://flagcdn.com/{iso2.lower()}.svg"
+
+
 async def seed_countries_from_restcountries(db: Session) -> int:
+    """Seed country metadata from the public mledoze/countries dataset."""
     existing = db.scalar(select(Country.id).limit(1))
     if existing is not None:
         return 0
 
-    url = f"{settings.rest_countries_base_url}/all?fields=cca2,cca3,name,capital,region,subregion,latlng,population,flags,borders,currencies,languages"
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.get(url)
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        response = await client.get(settings.countries_dataset_url)
         response.raise_for_status()
         payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError("Unexpected countries dataset payload shape")
 
     created = 0
     for item in payload:
@@ -32,7 +43,6 @@ async def seed_countries_from_restcountries(db: Session) -> int:
             continue
         latlng = item.get("latlng") or [None, None]
         capital_list = item.get("capital") or []
-        flags = item.get("flags") or {}
         country = Country(
             iso2=iso2.upper(),
             iso3=iso3.upper(),
@@ -43,7 +53,7 @@ async def seed_countries_from_restcountries(db: Session) -> int:
             latitude=latlng[0] if len(latlng) > 0 else None,
             longitude=latlng[1] if len(latlng) > 1 else None,
             population=item.get("population"),
-            flag_url=flags.get("svg") or flags.get("png"),
+            flag_url=_flag_url(iso2, item.get("flags")),
             borders=item.get("borders") or [],
             currencies=item.get("currencies") or {},
             languages=item.get("languages") or {},
@@ -64,7 +74,7 @@ async def fetch_world_bank_indicator(
         f"{settings.world_bank_base_url}/country/{iso2}/indicator/{indicator}"
         f"?format=json&per_page={per_page}"
     )
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         response = await client.get(url)
         response.raise_for_status()
         data = response.json()

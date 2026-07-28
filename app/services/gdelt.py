@@ -5,6 +5,7 @@ import io
 import zipfile
 from datetime import datetime, timezone
 from typing import Optional
+
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -38,6 +39,56 @@ CAMEO_CATEGORY_MAP: dict[str, EventCategory] = {
     "20": EventCategory.MILITARY,
 }
 
+# Common FIPS 10-4 → ISO 3166-1 alpha-2 mismatches
+FIPS_TO_ISO2: dict[str, str] = {
+    "UK": "GB",
+    "JA": "JP",
+    "RQ": "PR",
+    "GM": "DE",
+    "EN": "EE",
+    "LH": "LT",
+    "LG": "LV",
+    "BO": "BY",
+    "BU": "BG",
+    "EZ": "CZ",
+    "LO": "SK",
+    "SP": "ES",
+    "PO": "PT",
+    "SW": "SE",
+    "SZ": "CH",
+    "AU": "AT",
+    "AS": "AU",
+    "VM": "VN",
+    "KS": "KR",
+    "KN": "KP",
+    "CH": "CN",
+    "RI": "RS",
+    "BK": "BA",
+    "MJ": "ME",
+    "KV": "XK",
+    "TU": "TR",
+    "IZ": "IQ",
+    "IR": "IR",
+    "IS": "IL",
+    "AE": "AE",
+    "SA": "SA",
+    "SF": "ZA",
+    "NI": "NG",
+    "EG": "EG",
+    "IN": "IN",
+    "PK": "PK",
+    "RS": "RU",
+    "UP": "UA",
+    "PL": "PL",
+    "FR": "FR",
+    "IT": "IT",
+    "US": "US",
+    "CA": "CA",
+    "MX": "MX",
+    "BR": "BR",
+    "AR": "AR",
+}
+
 
 def categorize_cameo(code: str | None) -> EventCategory:
     if not code:
@@ -46,15 +97,55 @@ def categorize_cameo(code: str | None) -> EventCategory:
     return CAMEO_CATEGORY_MAP.get(root, EventCategory.OTHER)
 
 
-def _parse_gdelt_timestamp(value: str) -> datetime:
-    # GDELT uses YYYYMMDDHHMMSS
-    return datetime.strptime(value, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+def _safe_float(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _parse_gdelt_datetime(value: str) -> datetime:
+    value = value.strip()
+    if len(value) >= 14:
+        return datetime.strptime(value[:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    if len(value) >= 8:
+        return datetime.strptime(value[:8], "%Y%m%d").replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _action_geo_fields(row: list[str]) -> tuple[str | None, str | None, float | None, float | None, str | None, str | None]:
+    """
+    GDELT export gained ADM2 columns, shifting ActionGeo indices.
+
+    Classic (58 cols): Type=49 FullName=50 Country=51 ADM1=52 Lat=53 Long=54 Feature=55 DATE=56 URL=57
+    Current (61 cols): Type=51 FullName=52 Country=53 ADM1=54 ADM2=55 Lat=56 Long=57 Feature=58 DATE=59 URL=60
+    """
+    if len(row) >= 61:
+        return (
+            row[52] or None,
+            (row[53] or "").upper() or None,
+            _safe_float(row[56]),
+            _safe_float(row[57]),
+            row[59] or row[1] or None,
+            row[60] or None,
+        )
+    if len(row) >= 58:
+        return (
+            row[50] or None,
+            (row[51] or "").upper() or None,
+            _safe_float(row[53]),
+            _safe_float(row[54]),
+            row[56] or row[1] or None,
+            row[57] or None,
+        )
+    return None, None, None, None, row[1] if row else None, None
 
 
 async def resolve_latest_export_url(client: httpx.AsyncClient) -> str:
     response = await client.get(settings.gdelt_last_update_url, timeout=30.0)
     response.raise_for_status()
-    # Format: <bytes> <hash> <url>
     first_line = response.text.strip().splitlines()[0]
     parts = first_line.split()
     if len(parts) < 3:
@@ -72,32 +163,36 @@ def _country_lookup(db: Session) -> dict[str, Country]:
 
 def normalize_event_row(row: list[str], lookup: dict[str, Country]) -> Optional[dict]:
     """Normalize a GDELT 2.0 Events TSV row into our Event shape."""
-    if len(row) < 58:
+    if len(row) < 35:
         return None
 
     global_event_id = row[0]
-    event_code = row[26]
-    actor1 = row[6] or None
-    actor2 = row[16] or None
-    goldstein = float(row[30]) if row[30] else None
-    avg_tone = float(row[34]) if row[34] else None
-    # AvgTone is roughly -100..100; normalize to -1..1
-    sentiment = (avg_tone / 100.0) if avg_tone is not None else None
-    action_geo_country = (row[51] or row[37] or "").upper() or None
-    lat = float(row[53]) if row[53] else (float(row[39]) if row[39] else None)
-    lon = float(row[54]) if row[54] else (float(row[40]) if row[40] else None)
-    location_name = row[50] or row[36] or None
-    source_url = row[60] if len(row) > 60 else None
-    occurred_at = _parse_gdelt_timestamp(row[1]) if row[1] else datetime.now(timezone.utc)
+    if not global_event_id:
+        return None
 
-    country = None
-    if action_geo_country:
-        country = lookup.get(action_geo_country)
+    event_code = row[26] if len(row) > 26 else None
+    actor1 = row[6] or None if len(row) > 6 else None
+    actor2 = row[16] or None if len(row) > 16 else None
+    goldstein = _safe_float(row[30]) if len(row) > 30 else None
+    avg_tone = _safe_float(row[34]) if len(row) > 34 else None
+    sentiment = (avg_tone / 100.0) if avg_tone is not None else None
+
+    location_name, fips, lat, lon, occurred_raw, source_url = _action_geo_fields(row)
+    iso_hint = FIPS_TO_ISO2.get(fips, fips) if fips else None
+    country = lookup.get(iso_hint) if iso_hint else None
+
+    # Fall back to country centroid when ActionGeo coords are missing
+    if (lat is None or lon is None) and country is not None:
+        lat = lat if lat is not None else country.latitude
+        lon = lon if lon is not None else country.longitude
+
+    occurred_at = (
+        _parse_gdelt_datetime(occurred_raw) if occurred_raw else datetime.now(timezone.utc)
+    )
 
     actors = [a for a in [actor1, actor2] if a]
-    title_bits = [a for a in actors if a]
     category = categorize_cameo(event_code)
-    title = " / ".join(title_bits) if title_bits else f"{category.value.title()} event"
+    title = " / ".join(actors) if actors else f"{category.value.title()} event"
     if location_name:
         title = f"{title} — {location_name}"
 
@@ -117,7 +212,7 @@ def normalize_event_row(row: list[str], lookup: dict[str, Country]) -> Optional[
         "source_url": source_url,
         "occurred_at": occurred_at,
         "country_id": country.id if country else None,
-        "raw": {"cameo": event_code, "country_code": action_geo_country},
+        "raw": {"cameo": event_code, "fips": fips, "iso2": iso_hint, "ncols": len(row)},
     }
 
 
@@ -146,7 +241,10 @@ async def fetch_and_ingest_gdelt(db: Session, limit: int = 5000) -> IngestionRun
                 reader = csv.reader(text, delimiter="\t")
                 for row in reader:
                     fetched += 1
-                    payload = normalize_event_row(row, lookup)
+                    try:
+                        payload = normalize_event_row(row, lookup)
+                    except Exception:  # noqa: BLE001 - skip malformed rows
+                        continue
                     if not payload:
                         continue
 
