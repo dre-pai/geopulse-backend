@@ -1,5 +1,6 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_ready
 
 from app.config import get_settings
 
@@ -29,3 +30,9 @@ celery_app.conf.update(
         },
     },
 )
+
+
+@worker_ready.connect
+def _ingest_on_worker_ready(**_kwargs) -> None:
+    """Ensure the live map has events immediately after boot, not only on the crontab."""
+    celery_app.send_task("app.workers.tasks.ingest_gdelt_task")

@@ -11,20 +11,40 @@ Real-time geopolitical intelligence API for the GeoPulse dashboard.
 - Heuristic + optional OpenAI situation summaries
 - Docker Compose + GitHub Actions CI
 
-## Quick start
+## Quick start (frontend + backend)
+
+Requires Docker. Expects `geopulse-frontend` as a sibling directory.
+
+```bash
+./up.sh
+```
+
+| Service | URL |
+|---------|-----|
+| Frontend (Vite) | http://localhost:5173 |
+| API | http://localhost:8000 |
+| API docs | http://localhost:8000/docs |
+| RabbitMQ UI | http://localhost:15672 (`geopulse` / `geopulse`) |
+
+### Environments
+
+```bash
+./up.sh              # development (hot reload, default)
+./up.sh prod         # production images (nginx frontend on :3000)
+./up.sh down         # stop
+./up.sh logs         # follow logs
+./up.sh rebuild      # rebuild then start
+```
+
+`./up.sh` creates `.env` from `.env.example` if missing and builds/installs all dependencies inside Docker.
+
+Production compose does not bind-mount source; set `CORS_ORIGINS` / `WEB_PORT` in `.env` as needed. Override the frontend path with `FRONTEND_DIR=/path/to/geopulse-frontend`.
+
+### Local API only (without Docker for the API process)
 
 ```bash
 cp .env.example .env
-docker compose up --build
-```
-
-API: http://localhost:8000  
-Docs: http://localhost:8000/docs  
-RabbitMQ UI: http://localhost:15672 (`geopulse` / `geopulse`)
-
-### Local (without Docker for the API process)
-
-```bash
+docker compose up db rabbitmq -d
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

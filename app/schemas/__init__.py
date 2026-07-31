@@ -51,6 +51,8 @@ class EventOut(BaseModel):
     source_url: Optional[str] = None
     occurred_at: datetime
     country_id: Optional[int] = None
+    country_name: Optional[str] = None
+    country_iso2: Optional[str] = None
 
 
 class RiskScoreOut(BaseModel):

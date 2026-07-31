@@ -1,3 +1,5 @@
+name: geopulse
+
 services:
   db:
     image: postgres:16-alpine
@@ -14,6 +16,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
@@ -28,59 +31,73 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   api:
-    build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    build:
+      context: .
+      target: production
     env_file:
-      - .env.example
-    environment:
+      - .env
+    environment: &backend_env
+      APP_ENV: production
+      DEBUG: "false"
       DATABASE_URL: postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
       CELERY_BROKER_URL: amqp://geopulse:geopulse@rabbitmq:5672//
       CELERY_RESULT_BACKEND: db+postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
+      CORS_ORIGINS: http://localhost:3000,http://localhost,http://web
     ports:
       - "8000:8000"
-    volumes:
-      - .:/app
     depends_on:
       db:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    restart: unless-stopped
 
   worker:
-    build: .
+    build:
+      context: .
+      target: production
     command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
     env_file:
-      - .env.example
+      - .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
-      CELERY_BROKER_URL: amqp://geopulse:geopulse@rabbitmq:5672//
-      CELERY_RESULT_BACKEND: db+postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
-    volumes:
-      - .:/app
+      <<: *backend_env
     depends_on:
       db:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    restart: unless-stopped
 
   beat:
-    build: .
+    build:
+      context: .
+      target: production
     command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
     env_file:
-      - .env.example
+      - .env
     environment:
-      DATABASE_URL: postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
-      CELERY_BROKER_URL: amqp://geopulse:geopulse@rabbitmq:5672//
-      CELERY_RESULT_BACKEND: db+postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
-    volumes:
-      - .:/app
+      <<: *backend_env
     depends_on:
       db:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ${FRONTEND_DIR:-../geopulse-frontend}
+      target: production
+      args:
+        VITE_API_BASE: /api/v1
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
 
 volumes:
   geopulse_pg:

@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import Select, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
 from app.models import Country, Event, RelationshipEdge, RiskScore
@@ -26,6 +26,22 @@ from app.services.risk import compute_country_risk, events_today_count, get_coun
 from app.services.summarizer import generate_country_summary
 
 router = APIRouter()
+
+
+def serialize_event(event: Event) -> EventOut:
+    payload = EventOut.model_validate(event)
+    if event.country is None:
+        return payload
+    return payload.model_copy(
+        update={
+            "country_name": event.country.name,
+            "country_iso2": event.country.iso2,
+        }
+    )
+
+
+def events_query() -> Select[tuple[Event]]:
+    return select(Event).options(joinedload(Event.country))
 
 
 @router.get("/health")
@@ -102,10 +118,14 @@ def list_events(
     type: Optional[str] = Query(None, alias="type"),
     category: Optional[str] = None,
     q: Optional[str] = None,
+    hours: Optional[int] = Query(None, ge=1, le=168),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-) -> list[Event]:
-    stmt: Select[tuple[Event]] = select(Event).order_by(Event.occurred_at.desc()).limit(limit)
+) -> list[EventOut]:
+    stmt: Select[tuple[Event]] = events_query().order_by(Event.occurred_at.desc()).limit(limit)
+    if hours is not None:
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+        stmt = stmt.where(Event.occurred_at >= since)
     if country:
         c = get_country_by_iso(db, country)
         if c is None:
@@ -117,19 +137,19 @@ def list_events(
     if q:
         pattern = f"%{q}%"
         stmt = stmt.where(or_(Event.title.ilike(pattern), Event.location_name.ilike(pattern)))
-    return list(db.scalars(stmt))
+    return [serialize_event(event) for event in db.scalars(stmt).unique()]
 
 
 @router.get("/events/trending", response_model=list[EventOut])
-def trending_events(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)) -> list[Event]:
+def trending_events(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)) -> list[EventOut]:
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     stmt = (
-        select(Event)
+        events_query()
         .where(Event.occurred_at >= since)
         .order_by(Event.goldstein_scale.asc().nullslast(), Event.occurred_at.desc())
         .limit(limit)
     )
-    return list(db.scalars(stmt))
+    return [serialize_event(event) for event in db.scalars(stmt).unique()]
 
 
 @router.get("/risk", response_model=list[RiskScoreOut])
@@ -195,14 +215,15 @@ def timeline(
 @router.get("/search", response_model=SearchResult)
 def search(q: str = Query(..., min_length=2), limit: int = 50, db: Session = Depends(get_db)) -> SearchResult:
     pattern = f"%{q}%"
-    events = list(
-        db.scalars(
-            select(Event)
+    events = [
+        serialize_event(event)
+        for event in db.scalars(
+            events_query()
             .where(or_(Event.title.ilike(pattern), Event.location_name.ilike(pattern)))
             .order_by(Event.occurred_at.desc())
             .limit(limit)
-        )
-    )
+        ).unique()
+    ]
     countries = list(
         db.scalars(
             select(Country)

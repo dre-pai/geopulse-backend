@@ -1,0 +1,51 @@
+# Production overlay. Used by: ./up.sh prod
+# Does not load docker-compose.override.yml.
+
+services:
+  db:
+    ports: !reset []
+    restart: unless-stopped
+
+  rabbitmq:
+    ports: !override
+      - "15672:15672"
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      target: production
+    environment: &prod_backend_env
+      APP_ENV: production
+      DEBUG: "false"
+      DATABASE_URL: postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
+      CELERY_BROKER_URL: amqp://geopulse:geopulse@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: db+postgresql+psycopg2://geopulse:geopulse@db:5432/geopulse
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: production
+    environment:
+      <<: *prod_backend_env
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: .
+      target: production
+    environment:
+      <<: *prod_backend_env
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ${FRONTEND_DIR:-../geopulse-frontend}
+      target: production
+      args:
+        VITE_API_BASE: /api/v1
+    ports: !override
+      - "${WEB_PORT:-3000}:80"
+    restart: unless-stopped
